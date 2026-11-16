@@ -30,22 +30,51 @@ public:
             ROS_ERROR("subscribe failed: %s", e.what());
             throw;  //抛出
         }
-        
+        image_debug_ = it_.advertise(debug_topic_,queue_size_);
     }
 private:
+    //相机内参回调函数
     void cameraInfoCallBack(const sensor_msgs::CameraInfoConstPtr &msg){
         //ROS_INFO("b_x=%d", msg->binning_x);
-        image_info_ = msg;
-    }
+        if(msg->height == 0 || msg->width == 0 || msg->K[0] <= 0){
+            ROS_WARN_THROTTLE(5.0, "invalid camera_info");
+            return;
+        }       //即使return了，camera_info_会缓存最新的
+
+        //可以来个判断前后info是否一样来决定是否重建
+
+        //K就是相机的内参矩阵
+        K_ = (cv::Mat_<double>(3,3) <<
+                msg->K[0], msg->K[1], msg->K[2],
+                msg->K[3], msg->K[4], msg->K[5],
+                msg->K[6], msg->K[7], msg->K[8]
+        );
+
+        //D就是畸变参数
+        //.size返回的是int_t无符号
+        //D_ 是一个 1×n 的 double 行向量
+        D_  = cv::Mat(1,static_cast<int>(msg->D.size()),CV_64F);
+         for(size_t i=0; i < msg->D.size(); ++i){
+            D_.at<double>(0,static_cast<int>(i)) = msg->D[i];
+         }
+        camera_info_ = msg;
+
+    //     //test
+    //      ROS_INFO("camera: %ux%u fx=%.2f fy=%.2f cx=%.2f cy=%.2f D=%zu frame=%s",
+    //          msg->width, msg->height, K_.at<double>(0, 0), K_.at<double>(1, 1),
+    //          K_.at<double>(0, 2), K_.at<double>(1, 2), msg->D.size(),
+    //          msg->header.frame_id.c_str());
+     }
 
     void imageRawCallBack(const sensor_msgs::ImageConstPtr &msg){
-        if(!image_info_){
+        if(!camera_info_){
             ROS_WARN("null");
             return;
             //应该要用yaml里面的
             /*code*/
         }
 
+        // //test
         ROS_INFO("transporting susscessfully");
         //ROS_INFO("%s",msg->encoding.c_str());
 
@@ -67,6 +96,15 @@ private:
             return;
         }
         const cv::Mat& bgr = cv_ptr->image;
+
+        cv::Mat debug = bgr.clone();
+        //装甲板识别
+
+
+        cv_bridge::CvImage out(msg->header,sensor_msgs::image_encodings::BGR8,debug);
+        image_debug_.publish(out.toImageMsg());
+
+        // test
         // cv::imshow("1",bgr);
         // cv::waitKey(1);
     }
@@ -80,7 +118,8 @@ private:
     std::string image_topic_, camera_info_topic_, transport_, debug_topic_;
     uint32_t queue_size_;
 
-    sensor_msgs::CameraInfoConstPtr image_info_;
+    sensor_msgs::CameraInfoConstPtr camera_info_;
+    cv::Mat K_,D_;
 };
 
 int main(int argc, char** argv){
