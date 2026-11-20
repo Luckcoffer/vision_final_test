@@ -8,6 +8,10 @@
 #include <algorithm>   
 #include <cmath>     
 #include <array>  
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_ros/transform_broadcaster.h>
 
 class FtDetecor{
 public:
@@ -17,6 +21,16 @@ public:
         transport_ = pnh_.param<std::string>("transport", "compressed");
         queue_size_ = pnh_.param<int>("queue_size", 2);
         debug_topic_ = pnh_.param<std::string>("debug_topic", "/ft/debug/image");
+
+        w_big_ = pnh_.param<float>("w_big", 0.235f);
+        h_big_ = pnh_.param<float>("l_big", 0.127f);
+
+        object_points_big_ = {
+            {-w_big_/2,  h_big_/2, 0.f},     //TL
+            { w_big_/2,  h_big_/2, 0.f},     //TR
+            { w_big_/2, -h_big_/2,  0.f},    //BR
+            {-w_big_/2, -h_big_/2,  0.f}     //BL
+        };
 
         // //放大图像
         // zoom_ = pnh_.param<double>("debug_zoom", 1.0);
@@ -178,6 +192,7 @@ private:
         cv::drawContours(debug_, contours_, -1, cv::Scalar(255, 0, 0), 1);     //蓝色
         
             //====灯条配对====
+        int id = 0;
         std::vector<std::array<cv::Point2f, 4>> armors;   // 每块装甲板的 4 角点（TL,TR,BR,BL）,定义1
         for(size_t i = 0; i < bars_.size(); ++i){
             for(size_t j = i + 1; j < bars_.size(); ++j){
@@ -261,6 +276,71 @@ private:
                 const cv::Point2f ctr = (ordered[0] + ordered[1] + ordered[2] + ordered[3]) * 0.25f;
                 cv::circle(debug_, ctr, 3, cv::Scalar(0, 255, 255), -1);   // 黄色中心点
 
+                //====位姿解算与TF====
+                cv::Mat rvec, tvec;
+                bool ok = cv::solvePnP(object_points_big_, ordered, K_, D_, rvec, tvec, false, cv::SOLVEPNP_IPPE);
+                if(!ok){
+                    ROS_WARN("solvePnP failed");
+                    continue;
+                }
+
+                //旋转矩阵
+                cv::Mat R;  
+                cv::Rodrigues(rvec, R);
+
+                //四元数
+                tf2::Matrix3x3 m(
+                    R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2),   // 第 0 行
+                    R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2),   // 第 1 行
+                    R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2)    // 第 2 行
+                );
+
+                tf2::Quaternion q;
+                m.getRotation(q);
+                q.normalize();
+
+                geometry_msgs::TransformStamped ts;
+                ts.header.stamp = msg->header.stamp;
+                ts.header.frame_id = msg->header.frame_id;
+                ts.child_frame_id = "arrmor_";
+                ++id;
+
+                ts.transform.translation.x = tvec.at<double>(0);
+                ts.transform.translation.y = tvec.at<double>(1);
+                ts.transform.translation.z = tvec.at<double>(2);
+                ts.transform.rotation      = tf2::toMsg(q);
+
+                tf_broadcaster_.sendTransform(ts);
+
+                // double x = tvec.at<double>(0);
+                // double y = tvec.at<double>(1);
+                // double z = tvec.at<double>(2);
+                // double distance = cv::norm(tvec);
+
+                //验证
+                std::vector<cv::Point2f> reproj;
+                cv::projectPoints(object_points_big_, rvec, tvec, K_, D_, reproj);
+                double sum = 0, max_err = 0;
+                for (size_t i = 0; i < reproj.size(); ++i) {
+                    double e = cv::norm(reproj[i] - ordered[i]);
+                    sum += e;
+                    max_err = std::max(max_err, e);
+                    cv::line(debug_, reproj[i], reproj[(i + 1) % 4],
+                                cv::Scalar(255, 0, 255), 2);    
+                }        
+                double mean_err = sum / reproj.size();
+                ROS_INFO("reproj: mean=%.2f px, max=%.2f px", mean_err, max_err);
+
+                //画坐标轴
+                std::vector<cv::Point3f> axes = {
+                    {0, 0, 0}, {0.3f, 0, 0}, {0, 0.3f, 0}, {0, 0, 0.3f}
+                };
+                std::vector<cv::Point2f> proj;
+                cv::projectPoints(axes, rvec, tvec, K_, D_, proj);
+
+                cv::line(debug_, proj[0], proj[1], cv::Scalar(0, 0, 255), 2);   // X 红
+                cv::line(debug_, proj[0], proj[2], cv::Scalar(0, 255, 0), 2);   // Y 绿
+                cv::line(debug_, proj[0], proj[3], cv::Scalar(255, 0, 0), 2);   // Z 蓝
             }
         }
 
@@ -356,6 +436,13 @@ private:
         float          width;
         float          angle;
     };
+
+    //装甲板实际大小，单位：米
+    float w_big_;
+    float h_big_;
+    //物理点
+    std::vector<cv::Point3f> object_points_big_;
+    tf2_ros::TransformBroadcaster tf_broadcaster_;
     
     // //放大
     // double zoom_;
