@@ -13,6 +13,8 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <visualization_msgs/MarkerArray.h>
+#include <ft_detection/Detection.h>
+#include <ft_detection/DetectionFrame.h>
 
 class FtDetecor{
 public:
@@ -34,6 +36,7 @@ public:
         };
 
         marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/ft/armor_markers", 10);
+        det_pub_ = nh_.advertise<ft_detection::DetectionFrame>("/ft/detections", 10);
 
         // //放大图像
         // zoom_ = pnh_.param<double>("debug_zoom", 1.0);
@@ -371,8 +374,9 @@ private:
         // */
         // visualization_msgs::MarkerArray arr;
 
-        FtDetecor::publishTfMsg(armors_small, msg->header, 0);
-        FtDetecor::publishTfMsg(armors_big, msg->header, 1);
+        FtDetecor::publishTfMsg(armors_small, msg, 0);
+        FtDetecor::publishTfMsg(armors_big, msg, 1);
+        publishDetections(armors_small, armors_big, msg->header);
         // if(armors.size() > 0){
         //     int id_small=0, id_big=0;
         //     for (size_t i = 0; i < armors.size(); ++i){
@@ -480,7 +484,7 @@ private:
         return pts;             
     }
 
-    void publishTfMsg(const std::vector<FtDetecor::armor>& armors, const std_msgs::Header& header, const int& id){
+    void publishTfMsg(const std::vector<FtDetecor::armor>& armors, const sensor_msgs::ImageConstPtr &msg, const int& id){
         if(armors.empty()) return;
         // 选重投影误差最小的
         const auto best = std::min_element(armors.begin(), armors.end(),
@@ -505,7 +509,7 @@ private:
         q_prev = q;
 
         geometry_msgs::TransformStamped ts;
-        ts.header            = header;          // 时间戳 + frame_id 一起沿用
+        ts.header            = msg->header;          // 时间戳 + frame_id 一起沿用
         ts.child_frame_id    = "armor_" + std::to_string(id);         // ★ 固定名字，不编号
         ts.transform.translation.x = best->tvec.at<double>(0);
         ts.transform.translation.y = best->tvec.at<double>(1);
@@ -513,6 +517,7 @@ private:
         ts.transform.rotation      = tf2::toMsg(q);
 
         tf_broadcaster_.sendTransform(ts);
+        
 
         //画坐标轴
         std::vector<cv::Point3f> axes = {
@@ -525,6 +530,52 @@ private:
         cv::line(debug_, proj[0], proj[2], cv::Scalar(0, 255, 0), 2);   // Y 绿
         cv::line(debug_, proj[0], proj[3], cv::Scalar(255, 0, 0), 2);   // Z 蓝
     }
+
+    void publishDetections(const std::vector<armor>& small,
+                       const std::vector<armor>& big,
+                       const std_msgs::Header& header)
+{
+    ft_detection::DetectionFrame frame;
+    frame.header = header;
+
+    uint32_t next_id = 0;
+    auto addAll = [&](const std::vector<armor>& list, bool is_large) {
+        for (const auto& a : list) {
+            ft_detection::Detection d;
+            d.id             = next_id++;          // ★ 唯一编号
+            d.is_red         = true;
+            d.is_large_armor = is_large;
+
+            d.pose.position.x = a.tvec.at<double>(0);
+            d.pose.position.y = a.tvec.at<double>(1);
+            d.pose.position.z = a.tvec.at<double>(2);
+
+            cv::Mat R;
+            cv::Rodrigues(a.rvec, R);
+            tf2::Matrix3x3 m(R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2),
+                             R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2),
+                             R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2));
+            tf2::Quaternion q;
+            m.getRotation(q);
+            q.normalize();
+            d.pose.orientation = tf2::toMsg(q);    // ★ 每块板子自己的姿态
+
+            for (int k = 0; k < 4; ++k) {
+                d.corners[k].x = a.points[k].x;
+                d.corners[k].y = a.points[k].y;
+                d.corners[k].z = 0.0f;
+            }
+            d.confidence = static_cast<float>(1.0 / (1.0 + a.mean_err));
+
+            frame.detections.push_back(d);
+        }
+    };
+
+    addAll(small, false);
+    addAll(big,   true);
+
+    det_pub_.publish(frame);      // ★ 每帧只发一次（空也要发，让下游知道目标消失）
+}
 
 
 
@@ -564,6 +615,7 @@ private:
     tf2_ros::TransformBroadcaster tf_broadcaster_;
 
     ros::Publisher marker_pub_;
+    ros::Publisher det_pub_;
     
     // //放大
     // double zoom_;
