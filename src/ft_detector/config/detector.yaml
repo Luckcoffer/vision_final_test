@@ -1,11 +1,11 @@
-image_topic: /hk_camera/image_raw/
+image_topic: /hk_camera/image_raw
 camera_info_topic: /hk_camera/camera_info
 transport: compressed
 queue_size: 2
 debug_topic: /ft/debug/image
 
-w_big: 0.235f
-l_big: 0.127f
+w_big: 0.235
+l_big: 0.127
 
 # ===== HSV 阈值（OpenCV 8 位范围：H 0~179，S/V 0~255）=====
 
@@ -32,3 +32,11 @@ blue_v_lo: 80
 blue_h_hi: 140
 blue_s_hi: 255
 blue_v_hi: 255
+
+# ===== 灯条粗筛（0 = 关闭该项检查）=====
+bar_min_area: 10.0          # 轮廓面积下限（像素²）
+bar_max_tilt: 40.0          # 偏离竖直的最大角度（度）
+bar_min_long_side: 0.0      # 长边下限（像素），0 = 关闭
+bar_min_ratio: 0.0          # 长宽比下限，0 = 关闭
+bar_max_ratio: 0.0          # 长宽比上限，0 = 关闭
+bar_min_fill: 0.0           # 填充率下限，0 = 关闭

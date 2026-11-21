@@ -28,6 +28,9 @@ public:
         // HSV 阈值：默认值集中在 loadColorConfig()，可被 yaml / 命令行覆盖
         loadColorConfig();
 
+        // 灯条粗筛阈值：默认值集中在 loadBarFilterConfig()
+        loadBarFilterConfig();
+
         w_big_ = pnh_.param<float>("w_big", 0.235f);
         h_big_ = pnh_.param<float>("l_big", 0.127f);
 
@@ -172,7 +175,7 @@ private:
             const auto& contour = contours_[i];
             //面积过滤
             const double area = cv::contourArea(contour);
-            if(area < 10.0) continue;
+            if(area < bar_min_area_) continue;
 
             //长宽高过滤，有比值，筛出细长的
             // const cv::Rect r = cv::boundingRect(contour);
@@ -181,16 +184,21 @@ private:
             // if(r.height < 20 || ratio < 2.0) continue;
             //旋转矩形（不受倾斜影响）
             const cv::RotatedRect rr = cv::minAreaRect(contour);
-            const float long_side = std::max(rr.size.width, rr.size.height);
+            const float long_side  = std::max(rr.size.width,  rr.size.height);
             const float short_side = std::min(rr.size.height, rr.size.width);
-            //if(short_side < 0.0f) continue;
+            if (short_side < 1.0f) continue;      // 防除零，不可配置
 
-            const double ratio = static_cast<double>(long_side / short_side);
-            //if(long_side < 10.0f || ratio < 2.0 || ratio > 12.0) continue;
+            // 长边下限（0 = 关闭）
+            if (bar_min_long_side_ > 0.0 && long_side < bar_min_long_side_) continue;
 
-            // 填充率：排除 L 形、散点、锯齿 轮廓面积/矩形面积
+            // 长宽比上下限（0 = 关闭）
+            const double ratio = static_cast<double>(long_side) / short_side;
+            if (bar_min_ratio_ > 0.0 && ratio < bar_min_ratio_) continue;
+            if (bar_max_ratio_ > 0.0 && ratio > bar_max_ratio_) continue;
+
+            // 填充率：排除 L 形、散点、锯齿（0 = 关闭）
             const double fill = area / static_cast<double>(long_side * short_side);
-            //if (fill < 0.5) continue;
+            if (bar_min_fill_ > 0.0 && fill < bar_min_fill_) continue;
 
              //RotatedRect::angle 的语义在 OpenCV 版本间变过
 
@@ -205,7 +213,7 @@ private:
             // const float  dy   = p[(idx + 1) % 4].y - p[idx].y;
             // const double tilt = std::atan2(std::fabs(dx), std::fabs(dy)) * 180.0 / CV_PI;
             const float tilt = FtDetecor::barAngleDeg(rr);
-            if (tilt > 40.0) continue;         // 灯条不会斜过 40°
+            if (bar_max_tilt_ > 0.0 && tilt > bar_max_tilt_) continue;   // 0 = 关闭
 
             cv::Point2f p[4];       //向量
             rr.points(p);
@@ -531,6 +539,21 @@ private:
         }
     }
 
+    // 读取灯条粗筛阈值；0 表示关闭该项检查（与旧的注释状态等价）
+    void loadBarFilterConfig()
+    {
+        bar_min_area_      = pnh_.param<double>("bar_min_area",      10.0);
+        bar_max_tilt_      = pnh_.param<double>("bar_max_tilt",      40.0);
+        bar_min_long_side_ = pnh_.param<double>("bar_min_long_side",  0.0);
+        bar_min_ratio_     = pnh_.param<double>("bar_min_ratio",      0.0);
+        bar_max_ratio_     = pnh_.param<double>("bar_max_ratio",      0.0);
+        bar_min_fill_      = pnh_.param<double>("bar_min_fill",       0.0);
+
+        ROS_INFO("bar filter: area>=%.1f  tilt<=%.1f  long>=%.1f  ratio=[%.2f,%.2f]  fill>=%.2f  (0=off)",
+                 bar_min_area_, bar_max_tilt_, bar_min_long_side_,
+                 bar_min_ratio_, bar_max_ratio_, bar_min_fill_);
+    }
+
     //返回的是竖直的夹角，0~90
     float barAngleDeg(const cv::RotatedRect& rr) {
         cv::Point2f p[4];
@@ -699,6 +722,10 @@ private:
         float          width;
         float          angle;
     };
+
+    //=====灯条粗筛阈值（0 = 关闭该项）=====
+    double bar_min_area_, bar_max_tilt_;
+    double bar_min_long_side_, bar_min_ratio_, bar_max_ratio_, bar_min_fill_;
 
     //装甲板实际大小，单位：米
     float w_big_;
