@@ -1,0 +1,34 @@
+image_topic: /hk_camera/image_raw/
+camera_info_topic: /hk_camera/camera_info
+transport: compressed
+queue_size: 2
+debug_topic: /ft/debug/image
+
+w_big: 0.235f
+l_big: 0.127f
+
+# ===== HSV 阈值（OpenCV 8 位范围：H 0~179，S/V 0~255）=====
+
+# 红色第 1 段（H 绕环低端，0 附近）
+red1_h_lo: 0
+red1_s_lo: 100
+red1_v_lo: 200
+red1_h_hi: 34
+red1_s_hi: 255
+red1_v_hi: 255
+
+# 红色第 2 段（H 绕环高端，179 附近）
+red2_h_lo: 170
+red2_s_lo: 100
+red2_v_lo: 200
+red2_h_hi: 179
+red2_s_hi: 255
+red2_v_hi: 255
+
+# 蓝色（单段）
+blue_h_lo: 100
+blue_s_lo: 120
+blue_v_lo: 80
+blue_h_hi: 140
+blue_s_hi: 255
+blue_v_hi: 255

@@ -1,0 +1,6 @@
+<launch>
+  <!-- 必须放在 <node> 内部：参数才会落在私有命名空间 /ft_detector 下，pnh_ 才读得到 -->
+  <node pkg="ft_detector" type="ft_detector_node" name="ft_detector" output="screen">
+    <rosparam command="load" file="$(find ft_detector)/config/detector.yaml"/>
+  </node>
+</launch>

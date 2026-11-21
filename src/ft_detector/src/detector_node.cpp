@@ -25,6 +25,9 @@ public:
         queue_size_ = pnh_.param<int>("queue_size", 2);
         debug_topic_ = pnh_.param<std::string>("debug_topic", "/ft/debug/image");
 
+        // HSV 阈值：默认值集中在 loadColorConfig()，可被 yaml / 命令行覆盖
+        loadColorConfig();
+
         w_big_ = pnh_.param<float>("w_big", 0.235f);
         h_big_ = pnh_.param<float>("l_big", 0.127f);
 
@@ -62,11 +65,15 @@ public:
 private:
     struct armor{
         int size;       //0:小，1:大
+        bool is_red;
         std::array<cv::Point2f, 4> points;
         cv::Mat rvec;
         cv::Mat tvec;
         double  mean_err;
     };
+
+    // 一段 HSV 阈值：{下界 (H,S,V), 上界 (H,S,V)}
+    using HsvRange = std::pair<cv::Scalar, cv::Scalar>;
 
     //相机内参回调函数
     void cameraInfoCallBack(const sensor_msgs::CameraInfoConstPtr &msg){
@@ -138,9 +145,22 @@ private:
         cv::cvtColor(debug_,image_hsv_,cv::COLOR_BGR2HSV);
 
         //此处识别红色，不过灯条中间已经到橙色甚至黄色，地板倒影也有干扰
-        cv::inRange(image_hsv_,cv::Scalar(0, 100, 200),cv::Scalar(34, 255, 255),mask1_);
-        cv::inRange(image_hsv_,cv::Scalar(170, 100, 200),cv::Scalar(179, 255, 255),mask2_);
-        cv::bitwise_or(mask1_, mask2_, mask_);
+        // cv::inRange(image_hsv_,cv::Scalar(0, 100, 200),cv::Scalar(34, 255, 255),mask1_);
+        // cv::inRange(image_hsv_,cv::Scalar(170, 100, 200),cv::Scalar(179, 255, 255),mask2_);
+        // cv::bitwise_or(mask1_, mask2_, mask_);
+
+        //扩增识别蓝色红色
+        bool is_red = false;
+        FtDetecor::colorMask(image_hsv_, red_ranges_, mask1_);
+        FtDetecor::colorMask(image_hsv_, blue_ranges_, mask2_);
+        if(cv::countNonZero(mask1_) > cv::countNonZero(mask2_)){
+            is_red = true;
+            mask_ = mask1_;
+        }
+        else{
+            is_red = false;
+            mask_ = mask2_;
+        }
 
             //====画灯条轮廓====
         cv::findContours(mask_,contours_,cv::RETR_EXTERNAL,cv::CHAIN_APPROX_SIMPLE);
@@ -305,6 +325,7 @@ private:
 
                 //====位姿解算与TF====
                 cv::Mat rvec, tvec;
+                //这里应该要小的装甲板识别
                 bool ok = cv::solvePnP(object_points_big_, ordered, K_, D_, rvec, tvec, false, cv::SOLVEPNP_IPPE);
                 if(!ok){
                     ROS_WARN("solvePnP failed");
@@ -360,10 +381,10 @@ private:
                 ROS_INFO("reproj: mean=%.2f px, max=%.2f px", mean_err, max_err);
 
                 if(size == 0){
-                    armors_small.push_back({size, {ordered[0], ordered[1], ordered[2], ordered[3]}, rvec, tvec, mean_err});
+                    armors_small.push_back({size, is_red, {ordered[0], ordered[1], ordered[2], ordered[3]}, rvec, tvec, mean_err});
                 }
                 else{
-                    armors_big.push_back({size, {ordered[0], ordered[1], ordered[2], ordered[3]}, rvec, tvec, mean_err});
+                    armors_big.push_back({size, is_red, {ordered[0], ordered[1], ordered[2], ordered[3]}, rvec, tvec, mean_err});
                 }
             }
         }
@@ -437,6 +458,77 @@ private:
         // test
         // cv::imshow("1",bgr);
         // cv::waitKey(1);
+    }
+
+    //HSV掩膜函数
+    static void colorMask(const cv::Mat& hsv, const std::vector<HsvRange>& ranges, cv::Mat& mask){
+        cv::Mat temp;
+        mask.create(hsv.size(), CV_8UC1);
+        mask.setTo(0);
+        for(const auto& r : ranges){
+            cv::inRange(hsv, r.first, r.second, temp);
+            cv::bitwise_or(mask, temp, mask);
+        }
+    }
+
+    // 读一段 HSV 阈值：prefix 形如 "red1"，对应 red1_h_lo / red1_s_lo / ... 共 6 个 key
+    void loadRange(const std::string& prefix,
+                   const cv::Scalar& def_lo,
+                   const cv::Scalar& def_hi,
+                   HsvRange& out)
+    {
+        auto g = [&](const char* suffix, double def) {
+            return pnh_.param<double>(prefix + suffix, def);
+        };
+
+        out.first  = cv::Scalar(g("_h_lo", def_lo[0]), g("_s_lo", def_lo[1]), g("_v_lo", def_lo[2]));
+        out.second = cv::Scalar(g("_h_hi", def_hi[0]), g("_s_hi", def_hi[1]), g("_v_hi", def_hi[2]));
+
+        // 下界 > 上界会让掩膜恒为空，交换并告警
+        for (int i = 0; i < 3; ++i) {
+            if (out.first[i] > out.second[i]) {
+                ROS_WARN("HSV 参数 %s 第 %d 通道：下界 %.0f > 上界 %.0f，已自动交换",
+                         prefix.c_str(), i, out.first[i], out.second[i]);
+                std::swap(out.first[i], out.second[i]);
+            }
+        }
+
+        // 范围校验（H 只有 0~179，S/V 只有 0~255）
+        if (out.first[0] < 0.0 || out.second[0] > 179.0) {
+            ROS_WARN("HSV 参数 %s 的 H 超出 0~179，OpenCV 会截断", prefix.c_str());
+        }
+        if (out.second[1] > 255.0 || out.second[2] > 255.0) {
+            ROS_WARN("HSV 参数 %s 的 S/V 超出 0~255，OpenCV 会截断", prefix.c_str());
+        }
+    }
+
+    // 读取全部 HSV 阈值；参数未提供时使用内置默认值（与原硬编码一致）
+    void loadColorConfig()
+    {
+        red_ranges_.clear();
+        blue_ranges_.clear();
+
+        red_ranges_.resize(2);
+        loadRange("red1", cv::Scalar(  0, 100, 200), cv::Scalar( 34, 255, 255), red_ranges_[0]);
+        loadRange("red2", cv::Scalar(170, 100, 200), cv::Scalar(179, 255, 255), red_ranges_[1]);
+
+        blue_ranges_.resize(1);
+        loadRange("blue", cv::Scalar(100, 120,  80), cv::Scalar(140, 255, 255), blue_ranges_[0]);
+
+        for (size_t i = 0; i < red_ranges_.size(); ++i) {
+            const auto& r = red_ranges_[i];
+            ROS_INFO("HSV red%zu : (%.0f,%.0f,%.0f) ~ (%.0f,%.0f,%.0f)",
+                     i + 1,
+                     r.first[0],  r.first[1],  r.first[2],
+                     r.second[0], r.second[1], r.second[2]);
+        }
+        for (size_t i = 0; i < blue_ranges_.size(); ++i) {
+            const auto& r = blue_ranges_[i];
+            ROS_INFO("HSV blue%zu: (%.0f,%.0f,%.0f) ~ (%.0f,%.0f,%.0f)",
+                     i + 1,
+                     r.first[0],  r.first[1],  r.first[2],
+                     r.second[0], r.second[1], r.second[2]);
+        }
     }
 
     //返回的是竖直的夹角，0~90
@@ -534,48 +626,48 @@ private:
     void publishDetections(const std::vector<armor>& small,
                        const std::vector<armor>& big,
                        const std_msgs::Header& header)
-{
-    ft_detection::DetectionFrame frame;
-    frame.header = header;
+    {
+        ft_detection::DetectionFrame frame;
+        frame.header = header;
 
-    uint32_t next_id = 0;
-    auto addAll = [&](const std::vector<armor>& list, bool is_large) {
-        for (const auto& a : list) {
-            ft_detection::Detection d;
-            d.id             = next_id++;          // ★ 唯一编号
-            d.is_red         = true;
-            d.is_large_armor = is_large;
+        uint32_t next_id = 0;
+        auto addAll = [&](const std::vector<armor>& list, bool is_large) {
+            for (const auto& a : list) {
+                ft_detection::Detection d;
+                d.id             = next_id++;          // ★ 唯一编号
+                d.is_red         = a.is_red;
+                d.is_large_armor = is_large;
 
-            d.pose.position.x = a.tvec.at<double>(0);
-            d.pose.position.y = a.tvec.at<double>(1);
-            d.pose.position.z = a.tvec.at<double>(2);
+                d.pose.position.x = a.tvec.at<double>(0);
+                d.pose.position.y = a.tvec.at<double>(1);
+                d.pose.position.z = a.tvec.at<double>(2);
 
-            cv::Mat R;
-            cv::Rodrigues(a.rvec, R);
-            tf2::Matrix3x3 m(R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2),
-                             R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2),
-                             R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2));
-            tf2::Quaternion q;
-            m.getRotation(q);
-            q.normalize();
-            d.pose.orientation = tf2::toMsg(q);    // ★ 每块板子自己的姿态
+                cv::Mat R;
+                cv::Rodrigues(a.rvec, R);
+                tf2::Matrix3x3 m(R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2),
+                                 R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2),
+                                 R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2));
+                tf2::Quaternion q;
+                m.getRotation(q);
+                q.normalize();
+                d.pose.orientation = tf2::toMsg(q);    // ★ 每块板子自己的姿态
 
-            for (int k = 0; k < 4; ++k) {
-                d.corners[k].x = a.points[k].x;
-                d.corners[k].y = a.points[k].y;
-                d.corners[k].z = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    d.corners[k].x = a.points[k].x;
+                    d.corners[k].y = a.points[k].y;
+                    d.corners[k].z = 0.0f;
+                }
+                d.confidence = static_cast<float>(1.0 / (1.0 + a.mean_err));
+
+                frame.detections.push_back(d);
             }
-            d.confidence = static_cast<float>(1.0 / (1.0 + a.mean_err));
+        };
 
-            frame.detections.push_back(d);
-        }
-    };
+        addAll(small, false);
+        addAll(big,   true);
 
-    addAll(small, false);
-    addAll(big,   true);
-
-    det_pub_.publish(frame);      // ★ 每帧只发一次（空也要发，让下游知道目标消失）
-}
+        det_pub_.publish(frame);      // ★ 每帧只发一次（空也要发，让下游知道目标消失）
+    }
 
 
 
@@ -594,6 +686,7 @@ private:
     cv::Mat K_,D_;
     cv::Mat debug_;
         //=====装甲板识别=====
+    std::vector<HsvRange> red_ranges_, blue_ranges_;
     cv::Mat image_hsv_,mask_;
     cv::Mat mask1_,mask2_;
     //画灯条轮廓
